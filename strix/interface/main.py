@@ -8,6 +8,7 @@ import asyncio
 import contextlib
 import sys
 from pathlib import Path
+from typing import Any
 
 from rich.console import Console
 from rich.panel import Panel
@@ -15,7 +16,7 @@ from rich.text import Text
 
 from strix.config import codex, load_settings, persist_current
 from strix.core.paths import run_dir_for
-from strix.interface.cli_args import parse_arguments
+from strix.interface.cli_args import FAIL_ON_SEVERITIES, parse_arguments
 from strix.interface.environment import (
     check_docker_installed,
     pull_docker_image,
@@ -315,6 +316,36 @@ def display_completion_message(args: argparse.Namespace, results_path: Path) -> 
         notify_update(console)
 
 
+def findings_fail_build(
+    reports: list[dict[str, Any]], fail_on: str | None, *, completed: bool
+) -> bool:
+    """Whether headless findings should exit 2 under the ``--fail-on`` threshold.
+
+    With no threshold any finding fails. Otherwise a finding fails when its
+    severity is at or above the threshold. A severity outside the known scale
+    fails too, so a gate never passes on a value it cannot rank. ``none`` is a
+    known level below ``info`` and only fails without a threshold.
+
+    The threshold only applies to a completed run. A run that stopped early
+    (budget, turn limit, interrupt) may not have reached its serious findings,
+    so any finding fails it, as without ``--fail-on``.
+    """
+    if not reports:
+        return False
+    if fail_on is None or not completed:
+        return True
+    threshold = FAIL_ON_SEVERITIES.index(fail_on)
+    for report in reports:
+        severity = str(report.get("severity") or "").strip().lower()
+        if severity == "none":
+            continue
+        if severity not in FAIL_ON_SEVERITIES:
+            return True
+        if FAIL_ON_SEVERITIES.index(severity) <= threshold:
+            return True
+    return False
+
+
 def _print_error_panel(title: str, message: str) -> None:
     console = Console()
     error_text = Text()
@@ -501,7 +532,11 @@ def main() -> None:
 
     if args.non_interactive:
         report_state = get_global_report_state()
-        if report_state and report_state.vulnerability_reports:
+        if report_state and findings_fail_build(
+            report_state.vulnerability_reports,
+            args.fail_on,
+            completed=report_state.run_record.get("status") == "completed",
+        ):
             sys.exit(2)
 
 
